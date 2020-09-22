@@ -147,3 +147,28 @@ def plot_weights(array,
         highlight=highlight,
         ylabel=ylabel)
     plt.show()
+
+
+def plot_weights_and_save(array,
+                 figsize=(20, 2),
+                 height_padding_factor=0.2,
+                 length_padding=1.0,
+                 subticks_frequency=1.0,
+                 colors=default_colors,
+                 plot_funcs=default_plot_funcs,
+                 highlight={},
+                 ylabel="",
+                 file_name="",
+                 save_type="pdf"):
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111)
+    plot_weights_given_ax(ax=ax, array=array,
+                          height_padding_factor=height_padding_factor,
+                          length_padding=length_padding,
+                          subticks_frequency=subticks_frequency,
+                          colors=colors,
+                          plot_funcs=plot_funcs,
+                          highlight=highlight,
+                          ylabel=ylabel)
+    plt.show()
+    plt.savefig(file_name+'.{}'.format(save_type),bbox="tight")
