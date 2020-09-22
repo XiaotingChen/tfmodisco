@@ -128,7 +128,7 @@ def plot_weights_given_ax(ax, array,
     ax.set_ylabel(ylabel)
     ax.yaxis.label.set_fontsize(15)
     if file_name!=None:
-        ax.savefig(file_name + '.{}'.format(save_type), bbox_inches="tight")
+        ax.figure.savefig(file_name + '.{}'.format(save_type), bbox_inches="tight")
 
 def plot_weights(array,
                  figsize=(20,2),
