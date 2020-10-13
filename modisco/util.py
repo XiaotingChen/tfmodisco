@@ -433,13 +433,19 @@ def get_ic_trimming_indices(ppm, background, threshold, pseudocount=0.001):
         threshold: the minimum information content.
         remaining arguments same as for compute_per_position_ic
 
+    adding condition to avoid threshold too high
+
     Returns:
         (start_idx, end_idx). start_idx is inclusive, end_idx is exclusive.
     """
     per_position_ic = compute_per_position_ic(
                        ppm=ppm, background=background, pseudocount=pseudocount)
-    passing_positions = np.where(per_position_ic >= threshold)
-    return (passing_positions[0][0], passing_positions[0][-1]+1)
+    if np.max(per_position_ic)>=threshold:
+        passing_positions = np.where(per_position_ic >= threshold)
+        return (passing_positions[0][0], passing_positions[0][-1] + 1)
+    else:
+        return (np.argmax(per_position_ic), np.argmax(per_position_ic) + 1)
+
 
 
 def compute_per_position_ic(ppm, background, pseudocount):
