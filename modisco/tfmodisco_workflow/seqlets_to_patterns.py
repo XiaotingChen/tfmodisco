@@ -112,12 +112,12 @@ class TfModiscoSeqletsToPatternsFactory(object):
                        initial_flank_to_add=10,
 
                        prob_and_pertrack_sim_merge_thresholds=[
-                        (0.0001,0.84), (0.00001, 0.87), (0.000001, 0.9)],
+                       (0.8,0.8), (0.5, 0.85), (0.2, 0.9)],
 
                        prob_and_pertrack_sim_dealbreaker_thresholds=[
-                        (0.1,0.75), (0.01, 0.8), (0.001, 0.83),
-                        (0.0000001,0.9)],
+                        (0.4, 0.75), (0.2,0.8), (0.1, 0.85), (0.0,0.9)],
 
+                       merging_max_seqlets_subsample=300,
                        threshold_for_spurious_merge_detection=0.8,
 
                        min_similarity_for_seqlet_assignment=0.2,
@@ -171,6 +171,7 @@ class TfModiscoSeqletsToPatternsFactory(object):
         self.prob_and_pertrack_sim_dealbreaker_thresholds =\
             prob_and_pertrack_sim_dealbreaker_thresholds
 
+        self.merging_max_seqlets_subsample = merging_max_seqlets_subsample
         self.threshold_for_spurious_merge_detection =\
             threshold_for_spurious_merge_detection
 
@@ -191,7 +192,7 @@ class TfModiscoSeqletsToPatternsFactory(object):
                 ('class_name', type(self).__name__),
                 ('n_cores', self.n_cores),
                 ('initclusterer_factory',
-                 self.initclusterer_factory.get_jsonable_config())
+                 self.initclusterer_factory.get_jsonable_config()),
                 ('min_overlap_while_sliding', self.min_overlap_while_sliding),
                 ('embedder_factory',
                  self.embedder_factory.get_jsonable_config()),
@@ -222,6 +223,8 @@ class TfModiscoSeqletsToPatternsFactory(object):
                  self.prob_and_pertrack_sim_merge_thresholds),
                 ('prob_and_pertrack_sim_dealbreaker_thresholds',
                  self.prob_and_pertrack_sim_dealbreaker_thresholds),
+                ('merging_max_seqlets_subsample',
+                 self.merging_max_seqlets_subsample),
                 ('threshold_for_spurious_merge_detection',
                  self.threshold_for_spurious_merge_detection),
                 ('min_similarity_for_seqlet_assignment',
@@ -235,6 +238,11 @@ class TfModiscoSeqletsToPatternsFactory(object):
                        hypothetical_contribs_track_names,
                        track_signs,
                        other_comparison_track_names=[]):
+
+        bg_freq = np.mean(
+            track_set.track_name_to_data_track[onehot_track_name].fwd_tracks,
+            axis=(0,1))
+        assert len(bg_freq.shape)==1
 
         assert len(track_signs)==len(hypothetical_contribs_track_names)
         assert len(track_signs)==len(contrib_scores_track_names)
@@ -271,8 +279,7 @@ class TfModiscoSeqletsToPatternsFactory(object):
                 seqlets_to_1d_embedder=seqlets_to_1d_embedder,
                 affinity_mat_from_1d=\
                     affinitymat.core.NumpyCosineSimilarity(
-                        verbose=self.verbose,
-                        gpu_batch_size=None),
+                        verbose=self.verbose),
                 verbose=self.verbose)
 
         affmat_from_seqlets_with_nn_pairs =\
@@ -347,9 +354,10 @@ class TfModiscoSeqletsToPatternsFactory(object):
             aggregator.ExpandSeqletsToFillPattern(
                 track_set=track_set,
                 flank_to_add=self.initial_flank_to_add).chain(
-            aggregator.TrimToBestWindow(
+            aggregator.TrimToBestWindowByIC(
                 window_size=self.trim_to_window_size,
-                track_names=contrib_scores_track_names)).chain(
+                onehot_track_name=onehot_track_name,
+                bg_freq=bg_freq)).chain(
             aggregator.ExpandSeqletsToFillPattern(
                 track_set=track_set,
                 flank_to_add=self.initial_flank_to_add))
@@ -386,13 +394,9 @@ class TfModiscoSeqletsToPatternsFactory(object):
 
         #similarity settings for merging
         prob_and_sim_merge_thresholds =\
-            [(x[0], x[1]*(len(contrib_scores_track_names)
-                          +len(other_comparison_track_names)))
-             for x in self.prob_and_pertrack_sim_merge_thresholds]
+            self.prob_and_pertrack_sim_merge_thresholds
         prob_and_sim_dealbreaker_thresholds =\
-            [(x[0], x[1]*(len(contrib_scores_track_names)
-                          +len(other_comparison_track_names)))
-             for x in self.prob_and_pertrack_sim_dealbreaker_thresholds]
+            self.prob_and_pertrack_sim_dealbreaker_thresholds
 
         spurious_merge_detector = aggregator.DetectSpuriousMerging(
             track_names=contrib_scores_track_names,
@@ -409,9 +413,10 @@ class TfModiscoSeqletsToPatternsFactory(object):
             min_in_subcluster=self.final_min_cluster_size)
 
         #similar_patterns_collapser =\
-        #    aggregator.DynamicThresholdSimilarPatternsCollapser(
-        #        pattern_to_seqlet_sim_computer=
+        #    aggregator.DynamicDistanceSimilarPatternsCollapser(
+        #        pattern_to_pattern_sim_computer=
         #            pattern_to_seqlet_sim_computer,
+        #        aff_to_dist_mat=aff_to_dist_mat,
         #        pattern_aligner=core.CrossCorrelationPatternAligner(
         #            pattern_comparison_settings=
         #                affinitymat.core.PatternComparisonSettings(
@@ -422,19 +427,19 @@ class TfModiscoSeqletsToPatternsFactory(object):
         #                        affinitymat.MeanNormalizer().chain(
         #                        affinitymat.MagnitudeNormalizer()), 
         #                    min_overlap=self.min_overlap_while_sliding)),
-        #        collapse_condition=(lambda dist_prob, aligner_sim:
-        #            any([(dist_prob > x[0] and aligner_sim > x[1])
+        #        collapse_condition=(lambda prob, aligner_sim:
+        #            any([(prob > x[0] and aligner_sim > x[1])
         #                 for x in prob_and_sim_merge_thresholds])),
-        #        dealbreaker_condition=(lambda dist_prob, aligner_sim:
-        #            any([(dist_prob < x[0] and aligner_sim < x[1])              
+        #        dealbreaker_condition=(lambda prob, aligner_sim:
+        #            any([(prob < x[0] and aligner_sim < x[1])              
         #                 for x in prob_and_sim_dealbreaker_thresholds])),
         #        postprocessor=postprocessor1,
-        #        verbose=self.verbose) 
+        #        verbose=self.verbose)
+
         similar_patterns_collapser =\
-            aggregator.DynamicDistanceSimilarPatternsCollapser(
-                pattern_to_pattern_sim_computer=
-                    pattern_to_seqlet_sim_computer,
-                aff_to_dist_mat=aff_to_dist_mat,
+            aggregator.DynamicDistanceSimilarPatternsCollapser2(
+                pattern_comparison_settings=pattern_comparison_settings,
+                track_set=track_set,
                 pattern_aligner=core.CrossCorrelationPatternAligner(
                     pattern_comparison_settings=
                         affinitymat.core.PatternComparisonSettings(
@@ -445,14 +450,17 @@ class TfModiscoSeqletsToPatternsFactory(object):
                                 affinitymat.MeanNormalizer().chain(
                                 affinitymat.MagnitudeNormalizer()), 
                             min_overlap=self.min_overlap_while_sliding)),
-                collapse_condition=(lambda dist_prob, aligner_sim:
-                    any([(dist_prob > x[0] and aligner_sim > x[1])
+                collapse_condition=(lambda prob, aligner_sim:
+                    any([(prob >= x[0] and aligner_sim >= x[1])
                          for x in prob_and_sim_merge_thresholds])),
-                dealbreaker_condition=(lambda dist_prob, aligner_sim:
-                    any([(dist_prob < x[0] and aligner_sim < x[1])              
+                dealbreaker_condition=(lambda prob, aligner_sim:
+                    any([(prob <= x[0] and aligner_sim <= x[1])              
                          for x in prob_and_sim_dealbreaker_thresholds])),
                 postprocessor=postprocessor1,
-                verbose=self.verbose)
+                verbose=self.verbose,
+                max_seqlets_subsample=self.merging_max_seqlets_subsample,
+                n_cores=self.n_cores)
+
 
         seqlet_reassigner =\
            aggregator.ReassignSeqletsFromSmallClusters(
@@ -502,11 +510,17 @@ class SeqletsToPatternsResults(object):
 
     def __init__(self,
                  each_round_initcluster_motifs, 
-                 patterns, cluster_results,
-                 total_time_taken, success=True, **kwargs):
+                 patterns, 
+                 patterns_withoutreassignment,
+                 pattern_merge_hierarchy,
+                 cluster_results,
+                 total_time_taken,
+                 success=True, **kwargs):
         self.each_round_initcluster_motifs = each_round_initcluster_motifs
         self.success = success
         self.patterns = patterns
+        self.patterns_withoutreassignment = patterns_withoutreassignment
+        self.pattern_merge_hierarchy = pattern_merge_hierarchy
         self.cluster_results = cluster_results
         self.total_time_taken = total_time_taken
         self.__dict__.update(**kwargs)
@@ -548,27 +562,48 @@ class SeqletsToPatternsResults(object):
                         track_set=track_set)
             patterns = util.load_patterns(grp=grp["patterns"],
                                           track_set=track_set) 
+            if "patterns_withoutreassignment" in grp:
+                patterns_withoutreassignment = util.load_patterns(
+                    grp=grp["patterns_withoutreassignment"],
+                    track_set=track_set) 
+            else: #backwards compatibility
+                patterns_withoutreassignment = []
             cluster_results = None
-            total_time_taken = None
+            total_time_taken = grp.attrs["total_time_taken"]
+            pattern_merge_hierarchy =\
+                aggregator.PatternMergeHierarchy.from_hdf5(
+                    grp=grp["pattern_merge_hierarchy"],
+                    track_set=track_set)
             return cls(
                 each_round_initcluster_motifs=each_round_initcluster_motifs,
                 patterns=patterns,
+                patterns_withoutreassignment=patterns_withoutreassignment,
+                pattern_merge_hierarchy=pattern_merge_hierarchy,
                 cluster_results=cluster_results,
                 total_time_taken=total_time_taken)
         else:
             return cls(success=False, patterns=None, cluster_results=None,
-                       total_time_taken=None)
+                       total_time_taken=None,
+                       each_round_initcluster_motifs=None,
+                       patterns_withoutreassignment=None,
+                       pattern_merge_hierarchy=None)
 
     def save_hdf5(self, grp):
         grp.attrs["success"] = self.success
+        grp.attrs["total_time_taken"] = self.total_time_taken
         if (self.success):
             if (self.each_round_initcluster_motifs is not None):
                 self.save_each_round_initcluster_motifs(
                     grp=grp.create_group("each_round_initcluster_motifs"))
             util.save_patterns(self.patterns,
                                grp.create_group("patterns"))
+            util.save_patterns(
+                self.patterns_withoutreassignment,
+                grp.create_group("patterns_withoutreassignment"))
             self.cluster_results.save_hdf5(grp.create_group("cluster_results"))   
             grp.attrs['total_time_taken'] = self.total_time_taken
+            self.pattern_merge_hierarchy.save_hdf5(
+                    grp=grp.create_group("pattern_merge_hierarchy"))
 
 
 class AbstractSeqletsToPatterns(object):
@@ -651,7 +686,6 @@ class TfModiscoSeqletsToPatterns(AbstractSeqletsToPatterns):
                                   " with "+str(motif.num_seqlets)
                                   +" seqlets due to sign disagreement")
                         cluster_to_eliminated_motif[i] = motif
-                cluster_to_motif[i] = motif
         return cluster_to_motif, cluster_to_eliminated_motif
 
 
@@ -706,6 +740,8 @@ class TfModiscoSeqletsToPatterns(AbstractSeqletsToPatterns):
                         patterns=None,
                         seqlets=None,
                         affmat=None,
+                        each_round_initcluster_motifs=None,
+                        patterns_withoutreassignment=None,
                         cluster_results=None, 
                         total_time_taken=None,
                         success=False)
@@ -843,9 +879,9 @@ class TfModiscoSeqletsToPatterns(AbstractSeqletsToPatterns):
                     min_seqlets_in_motif=0)
 
             #obtain unique seqlets from adjusted motifs
-            seqlets = dict([(y.exidx_start_end_string, y)
+            seqlets = list(dict([(y.exidx_start_end_string, y)
                              for x in cluster_to_motif.values()
-                             for y in x.seqlets]).values()
+                             for y in x.seqlets]).values())
 
         if (self.verbose):
             print("Got "+str(len(cluster_to_motif.values()))+" clusters")
@@ -874,7 +910,7 @@ class TfModiscoSeqletsToPatterns(AbstractSeqletsToPatterns):
             sys.stdout.flush()
         merged_patterns, pattern_merge_hierarchy =\
             self.similar_patterns_collapser( 
-                patterns=split_patterns, seqlets=seqlets) 
+                patterns=split_patterns) 
         merged_patterns = sorted(merged_patterns, key=lambda x: -x.num_seqlets)
         if (self.verbose):
             print("Got "+str(len(merged_patterns))+" patterns after merging")
@@ -887,6 +923,8 @@ class TfModiscoSeqletsToPatterns(AbstractSeqletsToPatterns):
             sys.stdout.flush()
         reassigned_patterns = self.seqlet_reassigner(merged_patterns)
         final_patterns = self.final_postprocessor(reassigned_patterns)
+        final_patterns_withoutreassignment =\
+            self.final_postprocessor(merged_patterns)
         if (self.verbose):
             print("Got "+str(len(final_patterns))
                   +" patterns after reassignment")
@@ -903,6 +941,7 @@ class TfModiscoSeqletsToPatterns(AbstractSeqletsToPatterns):
         results = SeqletsToPatternsResults(
             each_round_initcluster_motifs=each_round_initcluster_motifs,             
             patterns=final_patterns,
+            patterns_withoutreassignment=final_patterns_withoutreassignment,
             seqlets=filtered_seqlets, #last stage of filtered seqlets
             #affmat=filtered_affmat,
             cluster_results=cluster_results, 
