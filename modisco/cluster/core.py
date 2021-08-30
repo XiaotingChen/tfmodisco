@@ -1,11 +1,16 @@
 from __future__ import division, print_function, absolute_import
 import sklearn
+import scipy
 from . import phenograph as ph
 import numpy as np
 import time
 import sys
 import leidenalg
 from tqdm import tqdm
+import uuid
+import os, re
+import subprocess
+from joblib import Parallel, delayed
 
 
 class ClusterResults(object):
@@ -75,19 +80,28 @@ class PhenographCluster(AbstractAffinityMatClusterer):
 
 class LeidenCluster(AbstractAffinityMatClusterer):
 
-    def __init__(self, contin_runs=10, n_leiden_iterations=-1,
+    def __init__(self, numseedstotry=10, n_leiden_iterations=-1,
                  partitiontype=leidenalg.ModularityVertexPartition,
                  affmat_transformer=None, verbose=True): 
-        self.contin_runs = contin_runs
+        self.numseedstotry = numseedstotry
         self.n_leiden_iterations = n_leiden_iterations
         self.partitiontype = partitiontype
         self.affmat_transformer = affmat_transformer
         self.verbose = verbose
 
     def __call__(self, orig_affinity_mat, initclusters):
-        #replace nan values with zeros
-        orig_affinity_mat = np.nan_to_num(orig_affinity_mat)
-        assert np.min(orig_affinity_mat) >= 0, np.min(orig_affinity_mat)
+
+        #assert there are no nan values in data
+        #assert that the min affinity is >= 0
+        if scipy.sparse.issparse(orig_affinity_mat):
+            assert np.sum(np.isnan(orig_affinity_mat.data))==0
+            #assert that the min affinity is >= 0
+            assert np.min(orig_affinity_mat.data) >= 0,\
+                    np.min(orig_affinity_mat.data)
+        else:
+            assert np.sum(np.isnan(orig_affinity_mat))==0
+            assert np.min(orig_affinity_mat) >= 0,\
+                    np.min(orig_affinity_mat)
 
         if (self.verbose):
             print("Beginning preprocessing + Leiden")
@@ -103,9 +117,9 @@ class LeidenCluster(AbstractAffinityMatClusterer):
         best_quality = None
 
         if (self.verbose):
-            toiterover = tqdm(range(self.contin_runs))
+            toiterover = tqdm(range(self.numseedstotry))
         else:
-            toiterover = range(self.contin_runs)
+            toiterover = range(self.numseedstotry)
 
         #if an initclustering is specified, we would want to try the Leiden
         # both with and without that initialization and take the one that
@@ -134,6 +148,154 @@ class LeidenCluster(AbstractAffinityMatClusterer):
                               quality=best_quality)
 
 
+def run_leiden(fileprefix, use_initclusters, n_vertices,
+               partitiontype, n_leiden_iterations, seed, refine):
+
+    lpath = os.path.join(os.path.dirname(__file__), "run_leiden")
+
+    args = [lpath,
+            "--sources_idxs_file", fileprefix+"_sources.npy",
+            "--targets_idxs_file", fileprefix+"_targets.npy",
+            "--weights_file", fileprefix+"_weights.npy",
+            "--n_vertices", str(n_vertices),
+            "--partition_type", partitiontype.__name__, 
+            "--n_iterations", str(n_leiden_iterations),
+            "--seed", str(seed)]
+    if (use_initclusters):
+        args = args + ["--initial_membership_file",
+                       fileprefix+"_initclusters.npy"]
+    if (refine):
+        args.append("--refine")
+
+    p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = p.communicate()
+
+    if (len(err)>0):
+        raise RuntimeError("----\nERROR:\n"
+                           +err.decode()
+                           +"\n----\nSTDOUT:\n"
+                           +out.decode())
+
+    parse_membership = False
+    membership = []
+    for i, line in enumerate(out.decode().splitlines()):
+        if (parse_membership):
+            membership.append(int(line))
+        if line.startswith("Quality:"):
+            quality = float(line.split(" ")[1])
+        if line.startswith("Membership:"):
+            parse_membership = True 
+
+    if (parse_membership==False):
+        raise RuntimeError("----\nERROR:\n"
+                           +err.decode()
+                           +"\n----\nSTDOUT:\n"
+                           +out.decode()
+                           +"\n---\nARGS:\n"
+                           +str(args))
+
+    return quality, np.array(membership)
+
+
+class LeidenClusterParallel(AbstractAffinityMatClusterer):
+
+    def __init__(self, n_jobs,
+                 numseedstotry=10, n_leiden_iterations=-1,
+                 partitiontype=leidenalg.ModularityVertexPartition,
+                 affmat_transformer=None, refine=False, verbose=True): 
+        self.numseedstotry = numseedstotry 
+        self.n_leiden_iterations = n_leiden_iterations
+        self.partitiontype = partitiontype
+        self.n_jobs = n_jobs
+        self.affmat_transformer = affmat_transformer
+        self.refine = refine
+        self.verbose = verbose
+
+    def __call__(self, orig_affinity_mat, initclusters):
+
+        #assert there are no nan values in data
+        #assert that the min affinity is >= 0
+        if scipy.sparse.issparse(orig_affinity_mat):
+            assert np.sum(np.isnan(orig_affinity_mat.data))==0
+            #assert that the min affinity is >= 0
+            assert np.min(orig_affinity_mat.data) >= 0,\
+                    np.min(orig_affinity_mat.data)
+        else:
+            assert np.sum(np.isnan(orig_affinity_mat))==0
+            assert np.min(orig_affinity_mat) >= 0,\
+                    np.min(orig_affinity_mat)
+
+        if (self.verbose):
+            print("Beginning preprocessing + Leiden")
+            sys.stdout.flush()
+        all_start = time.time()
+        if (self.affmat_transformer is not None):
+            affinity_mat = self.affmat_transformer(orig_affinity_mat)
+        else:
+            affinity_mat = orig_affinity_mat
+
+        the_graph = get_igraph_from_adjacency(adjacency=affinity_mat)
+        best_clustering = None
+        best_quality = None
+
+        toiterover = range(self.numseedstotry)
+
+        #if an initclustering is specified, we would want to try the Leiden
+        # both with and without that initialization and take the one that
+        # gets the best modularity. EXCEPT when refinement is also specified.
+        if (self.refine):
+            initclusters_to_try_list = [True]
+        else:
+            initclusters_to_try_list = [False]
+            if (initclusters is not None):
+                initclusters_to_try_list.append(True)
+
+
+        #write out the contents of affinity_mat and initclusters if applicable
+        uid = uuid.uuid1().hex
+        
+        sources, targets = affinity_mat.nonzero()
+        weights = affinity_mat[sources, targets]
+
+        np.save(uid+"_sources.npy", sources)
+        np.save(uid+"_targets.npy", targets)
+        np.save(uid+"_weights.npy", weights.A1) #A1 is the same as ravel()
+
+        if (initclusters is not None):
+            np.save(uid+"_initclusters.npy", initclusters)
+            print("initclusters length:",len(initclusters))
+
+        for use_initclusters in initclusters_to_try_list:
+
+            print("Affmat shape:",affinity_mat.shape[0])
+
+            parallel_leiden_results = (
+                Parallel(n_jobs=self.n_jobs,
+                         verbose=self.verbose)(
+                 delayed(run_leiden)(uid, use_initclusters,
+                                     affinity_mat.shape[0],
+                                     self.partitiontype,
+                                     self.n_leiden_iterations,
+                                     seed*100, self.refine)
+                 for seed in toiterover)) 
+
+            for quality,membership in parallel_leiden_results:
+                if ((best_quality is None) or (quality > best_quality)):
+                    best_quality = quality
+                    best_clustering = membership
+                    if (self.verbose):
+                        print("Quality:",best_quality)
+                        sys.stdout.flush()
+
+        # clean up
+        for f in os.listdir(os.getcwd()):
+            if re.search(uid, f):
+                os.remove(f)
+
+        return ClusterResults(cluster_indices=best_clustering,
+                              quality=best_quality)
+
+
 #From: https://github.com/theislab/scanpy/blob/8131b05b7a8729eae3d3a5e146292f377dd736f7/scanpy/_utils.py#L159
 def get_igraph_from_adjacency(adjacency, directed=None):
     """Get igraph graph from adjacency matrix."""
@@ -145,10 +307,7 @@ def get_igraph_from_adjacency(adjacency, directed=None):
     g = ig.Graph(directed=directed)
     g.add_vertices(adjacency.shape[0])  # this adds adjacency.shap[0] vertices
     g.add_edges(list(zip(sources, targets)))
-    try:
-        g.es['weight'] = weights
-    except:
-        pass
+    g.es['weight'] = weights
     if g.vcount() != adjacency.shape[0]:
         print('WARNING: The constructed graph has only '
               +str(g.vcount())+' nodes. '

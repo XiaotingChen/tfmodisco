@@ -77,7 +77,7 @@ def plot_weights_given_ax(ax, array,
                  plot_funcs=default_plot_funcs,
                  ylabel="",
                  file_name=None,
-                 save_type=".pdf"):
+                 save_type="pdf"):
     if len(array.shape)==3:
         array = np.squeeze(array)
     assert len(array.shape)==2, array.shape
@@ -139,11 +139,23 @@ def plot_weights(array,
     plot_weights_given_ax(ax=ax, array=array,**kwargs)
     plt.show()
 
-
 def plot_weights_and_save(array,
                  figsize=(20, 2),
                  **kwargs):
     fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot(111)
     plot_weights_given_ax(ax=ax, array=array,**kwargs)
+    plt.show()
+
+def plot_score_track_given_ax(arr, ax, threshold=None, **kwargs):
+    ax.plot(np.arange(len(arr)), arr, **kwargs)
+    if (threshold is not None):
+        ax.plot([0, len(arr)-1], [threshold, threshold])
+    ax.set_xlim(0,len(arr)-1)
+
+
+def plot_score_track(arr, threshold=None, figsize=(20,2), **kwargs):
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111) 
+    plot_score_track_given_ax(arr, threshold=threshold, ax=ax, **kwargs) 
     plt.show()
