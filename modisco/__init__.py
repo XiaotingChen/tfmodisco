@@ -13,3 +13,5 @@ from . import clusterinit
 from . import seqlet_embedding
 from . import cluster
 from . import pattern_filterer
+
+__version__ = '0.5.16.3'
